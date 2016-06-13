@@ -5,14 +5,14 @@
 // Package jpeg implements a JPEG image decoder and encoder.
 //
 // JPEG is defined in ITU-T T.81: http://www.w3.org/Graphics/JPEG/itu-t81.pdf.
-package strogonoff 
+package strogonoff
 
 import (
 	"bufio"
+	"errors"
 	"image"
-	"image/ycbcr"
+	_ "image"
 	"io"
-	"os"
 )
 
 // TODO(nigeltao): fix up the doc comment style so that sentences start with
@@ -22,6 +22,7 @@ import (
 type FormatError string
 
 func (e FormatError) String() string { return "invalid JPEG format: " + string(e) }
+func (e FormatError) Error() string  { return "invalid JPEG format: " + string(e) }
 
 // An UnsupportedError reports that the input uses a valid but unimplemented JPEG feature.
 type UnsupportedError string
@@ -84,7 +85,7 @@ var unzig = [blockSize]int{
 // If the passed in io.Reader does not also have ReadByte, then Decode will introduce its own buffering.
 type Reader interface {
 	io.Reader
-	ReadByte() (c byte, err os.Error)
+	ReadByte() (c byte, err error)
 }
 
 type decoder struct {
@@ -93,7 +94,7 @@ type decoder struct {
 	data_bit      int
 	data_finished bool
 	width, height int
-	img           *ycbcr.YCbCr
+	img           *image.YCbCr
 	ri            int // Restart Interval.
 	comps         [nComponent]component
 	huff          [maxTc + 1][maxTh + 1]huffman
@@ -104,7 +105,7 @@ type decoder struct {
 }
 
 // Reads and ignores the next n bytes.
-func (d *decoder) ignore(n int) os.Error {
+func (d *decoder) ignore(n int) error {
 	for n > 0 {
 		m := len(d.tmp)
 		if m > n {
@@ -120,13 +121,13 @@ func (d *decoder) ignore(n int) os.Error {
 }
 
 // Specified in section B.2.2.
-func (d *decoder) processSOF(n int) os.Error {
+func (d *decoder) processSOF(n int) UnsupportedError {
 	if n != 6+3*nComponent {
 		return UnsupportedError("SOF has wrong length")
 	}
 	_, err := io.ReadFull(d.r, d.tmp[0:6+3*nComponent])
 	if err != nil {
-		return err
+		return UnsupportedError(err.Error())
 	}
 	// We only support 8-bit precision.
 	if d.tmp[0] != 8 {
@@ -156,16 +157,16 @@ func (d *decoder) processSOF(n int) os.Error {
 			}
 		}
 	}
-	return nil
+	return UnsupportedError("")
 }
 
 // Specified in section B.2.4.1.
-func (d *decoder) processDQT(n int) os.Error {
+func (d *decoder) processDQT(n int) UnsupportedError {
 	const qtLength = 1 + blockSize
 	for ; n >= qtLength; n -= qtLength {
 		_, err := io.ReadFull(d.r, d.tmp[0:qtLength])
 		if err != nil {
-			return err
+			return UnsupportedError("")
 		}
 		pq := d.tmp[0] >> 4
 		if pq != 0 {
@@ -173,16 +174,16 @@ func (d *decoder) processDQT(n int) os.Error {
 		}
 		tq := d.tmp[0] & 0x0f
 		if tq > maxTq {
-			return FormatError("bad Tq value")
+			return UnsupportedError("bad Tq value")
 		}
 		for i := range d.quant[tq] {
 			d.quant[tq][i] = int(d.tmp[i+1])
 		}
 	}
 	if n != 0 {
-		return FormatError("DQT has wrong length")
+		return UnsupportedError("DQT has wrong length")
 	}
-	return nil
+	return UnsupportedError("")
 }
 
 // Clip x to the range [0, 255] inclusive.
@@ -225,13 +226,13 @@ func (d *decoder) storeMCU(mx, my int) {
 }
 
 // Specified in section B.2.3.
-func (d *decoder) processSOS(n int) os.Error {
+func (d *decoder) processSOS(n int) UnsupportedError {
 	if n != 4+2*nComponent {
 		return UnsupportedError("SOS has wrong length")
 	}
 	_, err := io.ReadFull(d.r, d.tmp[0:4+2*nComponent])
 	if err != nil {
-		return err
+		return UnsupportedError("")
 	}
 	if d.tmp[0] != nComponent {
 		return UnsupportedError("SOS has wrong number of image components")
@@ -253,20 +254,21 @@ func (d *decoder) processSOS(n int) os.Error {
 	mxx := (d.width + 8*h0 - 1) / (8 * h0)
 	myy := (d.height + 8*v0 - 1) / (8 * v0)
 	if d.img == nil {
-		var subsampleRatio ycbcr.SubsampleRatio
+
+		var subsampleRatio image.YCbCrSubsampleRatio
 		n := h0 * v0
 		switch n {
 		case 1:
-			subsampleRatio = ycbcr.SubsampleRatio444
+			subsampleRatio = image.YCbCrSubsampleRatio444
 		case 2:
-			subsampleRatio = ycbcr.SubsampleRatio422
+			subsampleRatio = image.YCbCrSubsampleRatio422
 		case 4:
-			subsampleRatio = ycbcr.SubsampleRatio420
+			subsampleRatio = image.YCbCrSubsampleRatio420
 		default:
 			panic("unreachable")
 		}
 		b := make([]byte, mxx*myy*(1*8*8*n+2*8*8))
-		d.img = &ycbcr.YCbCr{
+		d.img = &image.YCbCr{
 			Y:              b[mxx*myy*(0*8*8*n+0*8*8) : mxx*myy*(1*8*8*n+0*8*8)],
 			Cb:             b[mxx*myy*(1*8*8*n+0*8*8) : mxx*myy*(1*8*8*n+1*8*8)],
 			Cr:             b[mxx*myy*(1*8*8*n+1*8*8) : mxx*myy*(1*8*8*n+2*8*8)],
@@ -288,16 +290,16 @@ func (d *decoder) processSOS(n int) os.Error {
 					d.blocks[i][j] = allZeroes
 
 					// Decode the DC coefficient, as specified in section F.2.2.1.
-					value, err := d.decodeHuffman(&d.huff[dcTableClass][scanComps[i].td])
-					if err != nil {
-						return err
+					value, errf := d.decodeHuffman(&d.huff[dcTableClass][scanComps[i].td])
+					if errf != "" {
+						return UnsupportedError(errf.String())
 					}
 					if value > 16 {
 						return UnsupportedError("excessive DC component")
 					}
-					dcDelta, err := d.receiveExtend(value)
-					if err != nil {
-						return err
+					dcDelta, erru := d.receiveExtend(value)
+					if erru != "" {
+						return UnsupportedError(erru.String())
 					}
 					dc[i] += dcDelta
 					d.blocks[i][j][0] = dc[i] * qt[0]
@@ -306,19 +308,19 @@ func (d *decoder) processSOS(n int) os.Error {
 					for k := 1; k < blockSize; k++ {
 						value, err := d.decodeHuffman(&d.huff[acTableClass][scanComps[i].ta])
 
-						if err != nil {
-							return err
+						if err != "" {
+							return UnsupportedError(err.String())
 						}
 						val0 := value >> 4
 						val1 := value & 0x0f
 						if val1 != 0 {
 							k += int(val0)
 							if k > blockSize {
-								return FormatError("bad DCT index")
+								return UnsupportedError("bad DCT index")
 							}
 							ac, err := d.receiveExtend(val1)
-							if err != nil {
-								return err
+							if err != "" {
+								return UnsupportedError(err.String())
 							}
 							d.blocks[i][j][unzig[k]] = ac * qt[k]
 							if i == 0 && (ac < -1 || ac > 1) && !d.data_finished {
@@ -326,14 +328,14 @@ func (d *decoder) processSOS(n int) os.Error {
 								if d.data_bit == 0 {
 									d.data = append(d.data, byte(bit))
 								} else {
-									d.data[len(d.data) - 1] = d.data[len(d.data) - 1] << 1
+									d.data[len(d.data)-1] = d.data[len(d.data)-1] << 1
 									if bit != 0 {
-										d.data[len(d.data) - 1] |= 1
+										d.data[len(d.data)-1] |= 1
 									}
 								}
 								d.data_bit = (d.data_bit + 1) % 8
-								if d.data_bit == 0 && d.data[len(d.data) - 1] == 0 {
-									d.data = d.data[:len(d.data) - 1]
+								if d.data_bit == 0 && d.data[len(d.data)-1] == 0 {
+									d.data = d.data[:len(d.data)-1]
 									d.data_finished = true
 								}
 							}
@@ -342,7 +344,7 @@ func (d *decoder) processSOS(n int) os.Error {
 								break
 							}
 							k += 0x0f
-						}	
+						}
 					}
 
 					idct(&d.blocks[i][j])
@@ -355,10 +357,10 @@ func (d *decoder) processSOS(n int) os.Error {
 				// but this one assumes well-formed input, and hence the restart marker follows immediately.
 				_, err := io.ReadFull(d.r, d.tmp[0:2])
 				if err != nil {
-					return err
+					return UnsupportedError(err.Error())
 				}
 				if d.tmp[0] != 0xff || d.tmp[1] != expectedRST {
-					return FormatError("bad RST marker")
+					return UnsupportedError("bad RST marker")
 				}
 				expectedRST++
 				if expectedRST == rst7Marker+1 {
@@ -374,24 +376,24 @@ func (d *decoder) processSOS(n int) os.Error {
 		} // for mx
 	} // for my
 
-	return nil
+	return UnsupportedError("")
 }
 
 // Specified in section B.2.4.4.
-func (d *decoder) processDRI(n int) os.Error {
+func (d *decoder) processDRI(n int) FormatError {
 	if n != 2 {
 		return FormatError("DRI has wrong length")
 	}
 	_, err := io.ReadFull(d.r, d.tmp[0:2])
 	if err != nil {
-		return err
+		return FormatError(err.Error())
 	}
 	d.ri = int(d.tmp[0])<<8 + int(d.tmp[1])
-	return nil
+	return FormatError("")
 }
 
 // decode reads a JPEG image from r and returns it as an image.Image.
-func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, os.Error) {
+func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, FormatError) {
 	if rr, ok := r.(Reader); ok {
 		d.r = rr
 	} else {
@@ -401,7 +403,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, os.Error) {
 	// Check for the Start Of Image marker.
 	_, err := io.ReadFull(d.r, d.tmp[0:2])
 	if err != nil {
-		return nil, err
+		return nil, FormatError(err.Error())
 	}
 	if d.tmp[0] != 0xff || d.tmp[1] != soiMarker {
 		return nil, FormatError("missing SOI marker")
@@ -411,7 +413,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, os.Error) {
 	for {
 		_, err := io.ReadFull(d.r, d.tmp[0:2])
 		if err != nil {
-			return nil, err
+			return nil, FormatError(err.Error())
 		}
 		if d.tmp[0] != 0xff {
 			return nil, FormatError("missing 0xff marker start")
@@ -425,62 +427,63 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, os.Error) {
 		// length itself, so we subtract 2 to get the number of remaining bytes.
 		_, err = io.ReadFull(d.r, d.tmp[0:2])
 		if err != nil {
-			return nil, err
+			return nil, FormatError(err.Error())
 		}
 		n := int(d.tmp[0])<<8 + int(d.tmp[1]) - 2
 		if n < 0 {
 			return nil, FormatError("short segment length")
 		}
-
+		var errf FormatError
 		switch {
 		case marker == sof0Marker: // Start Of Frame (Baseline).
-			err = d.processSOF(n)
+			errf := d.processSOF(n)
 			if configOnly {
-				return nil, err
+				return nil, FormatError(errf.String())
 			}
 		case marker == sof2Marker: // Start Of Frame (Progressive).
-			err = UnsupportedError("progressive mode")
+			erru := UnsupportedError("progressive mode")
+			errf = FormatError(erru.String())
 		case marker == dhtMarker: // Define Huffman Table.
-			err = d.processDHT(n)
+			errf = d.processDHT(n)
 		case marker == dqtMarker: // Define Quantization Table.
-			err = d.processDQT(n)
+			errf = FormatError(d.processDQT(n).String())
 		case marker == sosMarker: // Start Of Scan.
-			err = d.processSOS(n)
+			errf = FormatError(d.processSOS(n).String())
 		case marker == driMarker: // Define Restart Interval.
-			err = d.processDRI(n)
+			errf = d.processDRI(n)
 		case marker >= app0Marker && marker <= app15Marker || marker == comMarker: // APPlication specific, or COMment.
-			err = d.ignore(n)
+			errf = FormatError(d.ignore(n).Error())
 		default:
-			err = UnsupportedError("unknown marker")
+			errf = FormatError("unknown marker")
 		}
-		if err != nil {
-			return nil, err
+		if errf != "" {
+			return nil, errf
 		}
 	}
-	return d.img, nil
+	return d.img, FormatError("")
 }
 
 // Decode reads a JPEG image from r and returns it as an image.Image.
-func Decode(r io.Reader) (image.Image, os.Error) {
+func Decode(r io.Reader) (image.Image, error) {
 	var d decoder
 	return d.decode(r, false)
 }
 
-// 
-func DecodeAndRead(r io.Reader) (image.Image, string, os.Error) {
+//
+func DecodeAndRead(r io.Reader) (image.Image, string, error) {
 	var d decoder
 	i, err := d.decode(r, false)
-	return i, string(d.data), err
+	return i, string(d.data), errors.New(err.String())
 }
 
 // DecodeConfig returns the color model and dimensions of a JPEG image without
 // decoding the entire image.
-func DecodeConfig(r io.Reader) (image.Config, os.Error) {
+func DecodeConfig(r io.Reader) (image.Config, error) {
 	var d decoder
-	if _, err := d.decode(r, true); err != nil {
-		return image.Config{}, err
+	if _, err := d.decode(r, true); err != "" {
+		return image.Config{}, errors.New(err.String())
 	}
-	return image.Config{image.RGBAColorModel, d.width, d.height}, nil
+	return image.Config{d.img.ColorModel(), d.width, d.height}, nil
 }
 
 func init() {

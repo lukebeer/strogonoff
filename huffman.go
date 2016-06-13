@@ -5,8 +5,8 @@
 package strogonoff
 
 import (
+	"errors"
 	"io"
-	"os"
 )
 
 // Each code is at most 16 bits long.
@@ -36,7 +36,7 @@ type huffman struct {
 }
 
 // Reads bytes from the io.Reader to ensure that bits.n is at least n.
-func (d *decoder) ensureNBits(n int) os.Error {
+func (d *decoder) ensureNBits(n int) error {
 	for d.b.n < n {
 		c, err := d.r.ReadByte()
 		if err != nil {
@@ -56,7 +56,7 @@ func (d *decoder) ensureNBits(n int) os.Error {
 				return err
 			}
 			if c != 0x00 {
-				return FormatError("missing 0xff00 sequence")
+				return errors.New("missing 0xff00 sequence")
 			}
 		}
 	}
@@ -64,10 +64,10 @@ func (d *decoder) ensureNBits(n int) os.Error {
 }
 
 // The composition of RECEIVE and EXTEND, specified in section F.2.2.1.
-func (d *decoder) receiveExtend(t uint8) (int, os.Error) {
+func (d *decoder) receiveExtend(t uint8) (int, UnsupportedError) {
 	err := d.ensureNBits(int(t))
 	if err != nil {
-		return 0, err
+		return 0, UnsupportedError(err.Error())
 	}
 	d.b.n -= int(t)
 	d.b.m >>= t
@@ -76,19 +76,19 @@ func (d *decoder) receiveExtend(t uint8) (int, os.Error) {
 	if x < s>>1 {
 		x += ((-1) << t) + 1
 	}
-	return x, nil
+	return x, UnsupportedError("")
 }
 
 // Processes a Define Huffman Table marker, and initializes a huffman struct from its contents.
 // Specified in section B.2.4.2.
-func (d *decoder) processDHT(n int) os.Error {
+func (d *decoder) processDHT(n int) FormatError {
 	for n > 0 {
 		if n < 17 {
 			return FormatError("DHT has wrong length")
 		}
 		_, err := io.ReadFull(d.r, d.tmp[0:17])
 		if err != nil {
-			return err
+			return FormatError(err.Error())
 		}
 		tc := d.tmp[0] >> 4
 		if tc > maxTc {
@@ -119,7 +119,7 @@ func (d *decoder) processDHT(n int) os.Error {
 		}
 		_, err = io.ReadFull(d.r, h.val[0:h.length])
 		if err != nil {
-			return err
+			return FormatError(err.Error())
 		}
 
 		// Derive size.
@@ -161,20 +161,20 @@ func (d *decoder) processDHT(n int) os.Error {
 			k <<= 1
 		}
 	}
-	return nil
+	return FormatError("")
 }
 
 // Returns the next Huffman-coded value from the bit stream, decoded according to h.
 // TODO(nigeltao): This decoding algorithm is simple, but slow. A lookahead table, instead of always
 // peeling off only 1 bit at at time, ought to be faster.
-func (d *decoder) decodeHuffman(h *huffman) (uint8, os.Error) {
+func (d *decoder) decodeHuffman(h *huffman) (uint8, FormatError) {
 	if h.length == 0 {
 		return 0, FormatError("uninitialized Huffman table")
 	}
 	for i, code := 0, 0; i < maxCodeLength; i++ {
 		err := d.ensureNBits(1)
 		if err != nil {
-			return 0, err
+			return 0, FormatError(err.Error())
 		}
 		if d.b.a&d.b.m != 0 {
 			code |= 1
@@ -182,7 +182,7 @@ func (d *decoder) decodeHuffman(h *huffman) (uint8, os.Error) {
 		d.b.n--
 		d.b.m >>= 1
 		if code <= h.maxCode[i] {
-			return h.val[h.valIndex[i]+code-h.minCode[i]], nil
+			return h.val[h.valIndex[i]+code-h.minCode[i]], FormatError("")
 		}
 		code <<= 1
 	}
